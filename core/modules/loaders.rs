@@ -39,6 +39,13 @@ pub enum ModuleLoadResponse {
   Async(Pin<Box<ModuleSourceFuture>>),
 }
 
+#[derive(Debug, Clone)]
+pub struct ModuleLoadReferrer {
+  pub specifier: ModuleSpecifier,
+  pub line_number: i64,
+  pub column_number: i64,
+}
+
 pub trait ModuleLoader {
   /// Returns an absolute URL.
   /// When implementing an spec-complaint VM, this should be exactly the
@@ -73,7 +80,7 @@ pub trait ModuleLoader {
   fn load(
     &self,
     module_specifier: &ModuleSpecifier,
-    maybe_referrer: Option<&ModuleSpecifier>,
+    maybe_referrer: Option<&ModuleLoadReferrer>,
     is_dyn_import: bool,
     requested_module_type: RequestedModuleType,
   ) -> ModuleLoadResponse;
@@ -171,7 +178,7 @@ impl ModuleLoader for NoopModuleLoader {
   fn load(
     &self,
     _module_specifier: &ModuleSpecifier,
-    _maybe_referrer: Option<&ModuleSpecifier>,
+    _maybe_referrer: Option<&ModuleLoadReferrer>,
     _is_dyn_import: bool,
     _requested_module_type: RequestedModuleType,
   ) -> ModuleLoadResponse {
@@ -220,20 +227,21 @@ impl ExtModuleLoader {
   }
 
   pub fn finalize(&self) -> Result<(), CoreError> {
-    let sources = self.sources.take();
-    let unused_modules: Vec<_> = sources.iter().collect();
+    // TODO(This PR): Revert.
+    // let sources = self.sources.take();
+    // let unused_modules: Vec<_> = sources.iter().collect();
 
-    if !unused_modules.is_empty() {
-      return Err(
-        CoreErrorKind::UnusedModules(
-          unused_modules
-            .into_iter()
-            .map(|(name, _)| name.to_string())
-            .collect::<Vec<_>>(),
-        )
-        .into_box(),
-      );
-    }
+    // if !unused_modules.is_empty() {
+    //   return Err(
+    //     CoreErrorKind::UnusedModules(
+    //       unused_modules
+    //         .into_iter()
+    //         .map(|(name, _)| name.to_string())
+    //         .collect::<Vec<_>>(),
+    //     )
+    //     .into_box(),
+    //   );
+    // }
 
     Ok(())
   }
@@ -270,20 +278,27 @@ impl ModuleLoader for ExtModuleLoader {
   fn load(
     &self,
     specifier: &ModuleSpecifier,
-    _maybe_referrer: Option<&ModuleSpecifier>,
+    _maybe_referrer: Option<&ModuleLoadReferrer>,
     _is_dyn_import: bool,
     _requested_module_type: RequestedModuleType,
   ) -> ModuleLoadResponse {
     let mut sources = self.sources.borrow_mut();
-    let source = match sources.remove(specifier.as_str()) {
+    // TODO(This PR): Revert.
+    let source = match sources.get(specifier.as_str()).map(|s| s.to_string().into()) {
       Some(source) => source,
       None => {
+      dbg!("failed", specifier.as_str());
+        eprintln!("{}", std::backtrace::Backtrace::force_capture());
         return ModuleLoadResponse::Sync(Err(JsErrorBox::generic(format!(
           "Specifier \"{0}\" was not passed as an extension module and was not included in the snapshot.",
           specifier
         ))));
       }
     };
+    if specifier.as_str() == "node:net" {
+      dbg!("loaded", specifier.as_str());
+      eprintln!("{}", std::backtrace::Backtrace::force_capture());
+    }
     let code = ModuleSourceCode::String(source);
     let code_cache = self
       .ext_code_cache
@@ -348,7 +363,7 @@ impl ModuleLoader for LazyEsmModuleLoader {
   fn load(
     &self,
     specifier: &ModuleSpecifier,
-    _maybe_referrer: Option<&ModuleSpecifier>,
+    _maybe_referrer: Option<&ModuleLoadReferrer>,
     _is_dyn_import: bool,
     _requested_module_type: RequestedModuleType,
   ) -> ModuleLoadResponse {
@@ -411,7 +426,7 @@ impl ModuleLoader for FsModuleLoader {
   fn load(
     &self,
     module_specifier: &ModuleSpecifier,
-    _maybe_referrer: Option<&ModuleSpecifier>,
+    _maybe_referrer: Option<&ModuleLoadReferrer>,
     _is_dynamic: bool,
     requested_module_type: RequestedModuleType,
   ) -> ModuleLoadResponse {
@@ -514,7 +529,7 @@ impl ModuleLoader for StaticModuleLoader {
   fn load(
     &self,
     module_specifier: &ModuleSpecifier,
-    _maybe_referrer: Option<&ModuleSpecifier>,
+    _maybe_referrer: Option<&ModuleLoadReferrer>,
     _is_dyn_import: bool,
     _requested_module_type: RequestedModuleType,
   ) -> ModuleLoadResponse {
@@ -604,7 +619,7 @@ impl<L: ModuleLoader> ModuleLoader for TestingModuleLoader<L> {
   fn load(
     &self,
     module_specifier: &ModuleSpecifier,
-    maybe_referrer: Option<&ModuleSpecifier>,
+    maybe_referrer: Option<&ModuleLoadReferrer>,
     is_dyn_import: bool,
     requested_module_type: RequestedModuleType,
   ) -> ModuleLoadResponse {

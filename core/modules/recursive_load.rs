@@ -1,5 +1,6 @@
 // Copyright 2018-2025 the Deno authors. MIT license.
 
+use crate::FastString;
 use crate::ModuleLoadResponse;
 use crate::ModuleLoader;
 use crate::ModuleSource;
@@ -12,8 +13,9 @@ use crate::modules::ModuleLoaderError;
 use crate::modules::ModuleRequest;
 use crate::modules::RequestedModuleType;
 use crate::modules::ResolutionKind;
+use crate::modules::loaders::ModuleLoadReferrer;
 use crate::modules::map::ModuleMap;
-use crate::resolve_url;
+use crate::source_map::SourceMapApplication;
 use futures::future::FutureExt;
 use futures::stream::FuturesUnordered;
 use futures::stream::Stream;
@@ -216,14 +218,14 @@ impl RecursiveModuleLoad {
     module_request: &ModuleRequest,
     module_source: ModuleSource,
   ) -> Result<(), ModuleError> {
-    let module_id = self.module_map_rc.new_module(
+    let (module_id, code) = self.module_map_rc.new_module(
       scope,
       self.is_currently_loading_main_module(),
       self.is_dynamic_import(),
       module_source,
     )?;
 
-    self.register_and_recurse_inner(module_id, module_request);
+    self.register_and_recurse_inner(module_id, module_request, code.as_ref());
 
     // Update `self.state` however applicable.
     if self.state == LoadState::LoadingRoot {
@@ -241,6 +243,7 @@ impl RecursiveModuleLoad {
     &mut self,
     module_id: usize,
     module_request: &ModuleRequest,
+    code: Option<&FastString>,
   ) {
     // Recurse the module's imports. There are two cases for each import:
     // 1. If the module is not in the module map, start a new load for it in
@@ -278,7 +281,51 @@ impl RecursiveModuleLoad {
             _ => {
               let request = module_request.clone();
               let visited_as_alias = self.visited_as_alias.clone();
-              let referrer = referrer.clone();
+              let referrer = code.and_then(|code| {
+                let source_offset = request.referrer_source_offset?;
+                let (line_number, column_number) = code
+                  .as_str()
+                  .char_indices()
+                  .take_while(|(i, _)| *i < source_offset as _)
+                  .filter(|(_, c)| *c == '\n')
+                  .enumerate()
+                  .last()
+                  .map(|(n, (i, _))| {
+                    (n as u32 + 2, source_offset as u32 - i as u32)
+                  })
+                  .unwrap_or((1, source_offset as _));
+                let (specifier, line_number, column_number) = match self
+                  .module_map_rc
+                  .source_mapper
+                  .borrow_mut()
+                  .apply_source_map(
+                    referrer.as_str(),
+                    line_number,
+                    column_number,
+                  ) {
+                  SourceMapApplication::Unchanged => {
+                    (referrer.clone(), line_number as _, column_number as _)
+                  }
+                  SourceMapApplication::LineAndColumn {
+                    line_number,
+                    column_number,
+                  } => (referrer.clone(), line_number as _, column_number as _),
+                  SourceMapApplication::LineAndColumnAndFileName {
+                    file_name,
+                    line_number,
+                    column_number,
+                  } => (
+                    ModuleSpecifier::parse(&file_name).ok()?,
+                    line_number as _,
+                    column_number as _,
+                  ),
+                };
+                Some(ModuleLoadReferrer {
+                  specifier,
+                  line_number,
+                  column_number,
+                })
+              });
               let loader = self.loader.clone();
               let is_dynamic_import = self.is_dynamic_import();
               let requested_module_type = request.requested_module_type.clone();
@@ -293,9 +340,10 @@ impl RecursiveModuleLoad {
                 {
                   return Ok(None);
                 }
+
                 let load_response = loader.load(
                   &request.specifier,
-                  Some(&referrer),
+                  referrer.as_ref(),
                   is_dynamic_import,
                   requested_module_type,
                 );
@@ -348,11 +396,12 @@ impl Stream for RecursiveModuleLoad {
         let module_request = ModuleRequest {
           specifier: module_specifier.clone(),
           requested_module_type: requested_module_type.clone(),
+          referrer_source_offset: None,
         };
         let load_fut = if let Some(module_id) = inner.root_module_id {
           // If the inner future is already in the map, we might be done (assuming there are no pending
           // loads).
-          inner.register_and_recurse_inner(module_id, &module_request);
+          inner.register_and_recurse_inner(module_id, &module_request, None);
           if inner.pending.is_empty() {
             inner.state = LoadState::Done;
           } else {
@@ -361,19 +410,13 @@ impl Stream for RecursiveModuleLoad {
           // Internally re-poll using the new state to avoid spinning the event loop again.
           return Self::poll_next(Pin::new(inner), cx);
         } else {
-          let maybe_referrer = match inner.init {
-            LoadInit::DynamicImport(_, ref referrer, _) => {
-              resolve_url(referrer).ok()
-            }
-            _ => None,
-          };
           let loader = inner.loader.clone();
           let is_dynamic_import = inner.is_dynamic_import();
           let requested_module_type = requested_module_type.clone();
           async move {
             let load_response = loader.load(
               &module_specifier,
-              maybe_referrer.as_ref(),
+              None,
               is_dynamic_import,
               requested_module_type,
             );

@@ -26,6 +26,7 @@ pub use loaders::ExtCodeCache;
 pub(crate) use loaders::ExtModuleLoader;
 pub use loaders::FsModuleLoader;
 pub(crate) use loaders::LazyEsmModuleLoader;
+pub use loaders::ModuleLoadReferrer;
 pub use loaders::ModuleLoadResponse;
 pub use loaders::ModuleLoader;
 pub use loaders::ModuleLoaderError;
@@ -635,6 +636,8 @@ impl std::fmt::Display for RequestedModuleType {
 pub(crate) struct ModuleRequest {
   pub specifier: ModuleSpecifier,
   pub requested_module_type: RequestedModuleType,
+  /// None if this is a root request.
+  pub referrer_source_offset: Option<i32>,
 }
 
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
